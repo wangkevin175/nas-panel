@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NAS电源">
+<meta name="theme-color" content="#0f1419">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>NAS 电源控制</title>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+<style>
+:root {
+  --bg: #0f1419; --card: #1a2129; --card2: #212a35; --border: #2d3a47;
+  --text: #e6edf3; --muted: #8b98a5; --accent: #4da3ff;
+  --green: #3fb950; --red: #f85149; --orange: #d29922; --purple: #a371f7;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  max-width: 640px; margin: 0 auto; padding: 16px 14px 40px;
+  min-height: 100vh;
+}
+h1 { font-size: 20px; display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.conn-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
+.conn-dot.ok { background: var(--green); }
+.conn-dot.wait { background: var(--orange); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
+.conn-text { font-size: 12px; color: var(--muted); font-weight: normal; }
+
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px; margin-bottom: 12px;
+}
+.card h2 { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 10px; letter-spacing: 1px; }
+
+.status-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.status-item { background: var(--card2); border-radius: 10px; padding: 12px; text-align: center; }
+.status-item .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.status-item .value { font-size: 18px; font-weight: 600; }
+.status-item .value.big { font-size: 30px; }
+.value.on { color: var(--green); }
+.value.off { color: var(--muted); }
+.value.warn { color: var(--orange); }
+.value.hot { color: var(--red); }
+.value.purple { color: var(--purple); }
+.stale .value { opacity: 0.35; }
+.stale-note { font-size: 11px; color: var(--orange); margin-top: 4px; display: none; }
+.stale .stale-note { display: block; }
+
+.btn-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+button {
+  background: var(--card2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 8px; font-size: 15px; font-weight: 600;
+  cursor: pointer; transition: transform .06s, background .15s;
+}
+button:active { transform: scale(0.96); }
+button:disabled { opacity: 0.4; pointer-events: none; }
+.btn-power { border-color: var(--green); color: var(--green); }
+.btn-off { border-color: var(--orange); color: var(--orange); }
+.btn-force { border-color: var(--red); color: var(--red); }
+.btn-plain { border-color: var(--accent); color: var(--accent); }
+
+.fan-slider-row { display: flex; align-items: center; gap: 12px; }
+input[type=range] { flex: 1; accent-color: var(--accent); height: 30px; }
+.fan-val { font-size: 20px; font-weight: 600; width: 64px; text-align: center; color: var(--accent); }
+.row-gap { margin-top: 10px; }
+
+.toggle-row { display: flex; align-items: center; justify-content: space-between; }
+.switch { position: relative; width: 52px; height: 28px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider-ui {
+  position: absolute; inset: 0; background: var(--border); border-radius: 28px;
+  transition: .2s; cursor: pointer;
+}
+.slider-ui:before {
+  content: ""; position: absolute; width: 22px; height: 22px; left: 3px; top: 3px;
+  background: var(--text); border-radius: 50%; transition: .2s;
+}
+.switch input:checked + .slider-ui { background: var(--red); }
+.switch input:checked + .slider-ui:before { transform: translateX(24px); }
+
+.ota-progress { display: none; margin-top: 12px; }
+.ota-bar-bg { background: var(--card2); border-radius: 6px; height: 14px; overflow: hidden; }
+.ota-bar { height: 100%; width: 0%; background: var(--purple); transition: width .3s; }
+.ota-text { font-size: 12px; color: var(--muted); margin-top: 6px; text-align: center; }
+
+.log-area {
+  background: #0a0e12; border-radius: 8px; padding: 10px; height: 220px;
+  overflow-y: auto; font-size: 12px; line-height: 1.7; font-family: Menlo, Consolas, monospace;
+}
+.log-line { display: flex; gap: 8px; }
+.log-time { color: var(--muted); flex-shrink: 0; }
+.log-hb { color: var(--muted); }
+.log-ack { color: var(--green); }
+.log-err { color: var(--red); }
+.log-ota { color: var(--purple); }
+.log-info { color: var(--accent); }
+.clear-log { font-size: 12px; color: var(--muted); background: none; border: none; padding: 4px; }
+
+.dev-tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.dev-tab {
+  background: var(--card); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 20px; padding: 6px 18px; font-size: 14px; font-weight: 600;
+}
+.dev-tab.active { border-color: var(--accent); color: var(--accent); background: rgba(77,163,255,0.1); }
+.dev-tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--red); }
+.dev-tab .dot.on { background: var(--green); }
+
+.settings-grid { display: grid; gap: 10px; }
+.settings-grid label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+.settings-grid input {
+  width: 100%; background: var(--card2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 10px; font-size: 14px;
+}
+.settings-grid input:focus { outline: none; border-color: var(--accent); }
+.hint { font-size: 11px; color: var(--muted); line-height: 1.6; }
+.settings-actions { display: flex; gap: 10px; }
+.settings-actions button { flex: 1; }
+
+.ota-url-row { display: flex; gap: 10px; }
+.ota-url-row input { flex: 1; background: var(--card2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 10px; font-size: 13px; }
+.ota-url-row input:focus { outline: none; border-color: var(--accent); }
+.ota-url-row button { white-space: nowrap; padding: 10px 16px; font-size: 13px; }
+
+.hidden { display: none !important; }
+.section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.section-head h2 { margin-bottom: 0; }
+
+/* 可点击的状态格子 */
+.status-item { position: relative; cursor: pointer; transition: border-color .15s; border: 1px solid transparent; }
+.status-item:hover { border-color: var(--accent); }
+.status-item:active { transform: scale(0.97); }
+.status-item .hist-arrow { position: absolute; top: 8px; right: 10px; font-size: 11px; color: var(--muted); opacity: 0; transition: opacity .15s; }
+.status-item:hover .hist-arrow { opacity: 1; }
+
+/* 历史视图 */
+.hist-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.hist-head .btn-plain { padding: 8px 18px; font-size: 13px; }
+.hist-title { font-size: 17px; font-weight: 600; flex: 1; }
+.hist-range { font-size: 12px; color: var(--muted); }
+#chartBox { background: var(--card2); border-radius: 10px; padding: 8px 4px 2px; margin-bottom: 12px; }
+.hist-hint { font-size: 11px; color: var(--muted); margin: 6px 0 12px; }
+.event-list { max-height: 260px; overflow-y: auto; }
+.event-item { display: flex; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.event-item .ev-time { color: var(--muted); font-family: Menlo, Consolas, monospace; font-size: 12px; }
+.event-item .ev-new { font-weight: 600; }
+.up { color: var(--green); }
+.down { color: var(--red); }
+.ev-mid { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1><span class="conn-dot" id="connDot"></span>NAS 电源控制<span class="conn-text" id="connText">未连接</span></h1>
+<div class="dev-tabs" id="devTabs"></div>
+
+<!-- 状态卡片 -->
+<div class="card main-only" id="statusCard">
+  <div class="section-head"><h2>设备状态</h2><span class="conn-text" id="devLabel"></span><span class="conn-text" id="hbTime">--</span></div>
+  <div class="status-grid">
+    <div class="status-item" onclick="openHistory('power')">
+      <div class="hist-arrow">📈</div>
+      <div class="label">主机电源</div>
+      <div class="value big" id="stPower">--</div>
+      <div class="stale-note">数据过期</div>
+    </div>
+    <div class="status-item" onclick="openHistory('temp')">
+      <div class="hist-arrow">📈</div>
+      <div class="label">板载温度</div>
+      <div class="value big" id="stTemp">--</div>
+      <div class="stale-note">数据过期</div>
+    </div>
+    <div class="status-item" onclick="openHistory('fan')">
+      <div class="hist-arrow">📈</div>
+      <div class="label">风扇</div>
+      <div class="value" id="stFan">--</div>
+      <div class="stale-note">数据过期</div>
+    </div>
+    <div class="status-item" onclick="openHistory('lock')">
+      <div class="hist-arrow">📈</div>
+      <div class="label">童锁</div>
+      <div class="value" id="stLock">--</div>
+      <div class="stale-note">数据过期</div>
+    </div>
+    <div class="status-item" onclick="openHistory('threshold')">
+      <div class="hist-arrow">📈</div>
+      <div class="label">风扇阈值</div>
+      <div class="value" id="stThresh">--</div>
+      <div class="stale-note">数据过期</div>
+    </div>
+    <div class="status-item" onclick="openHistory('version')">
+      <div class="hist-arrow">📈</div>
+      <div class="label">固件版本</div>
+      <div class="value purple" id="stVer">--</div>
+      <div class="stale-note">数据过期</div>
+    </div>
+  </div>
+</div>
+
+<!-- 电源控制 -->
+<div class="card main-only">
+  <h2>电源控制</h2>
+  <div class="btn-row">
+    <button class="btn-power" id="btnOn">开机</button>
+    <button class="btn-off" id="btnOff">关机</button>
+    <button class="btn-force" id="btnForce">强制关机</button>
+  </div>
+</div>
+
+<!-- 风扇与童锁 -->
+<div class="card main-only">
+  <h2>风扇与童锁</h2>
+  <div class="fan-slider-row">
+    <input type="range" id="fanSlider" min="20" max="80" step="1" value="45">
+    <div class="fan-val" id="fanVal">45°</div>
+    <button class="btn-plain" id="btnFanSet" style="padding:10px 18px">设置</button>
+  </div>
+  <div class="toggle-row row-gap">
+    <div><div style="font-size:15px;font-weight:600">机箱按键童锁</div>
+    <div class="hint">开启后机箱物理电源键失效</div></div>
+    <label class="switch"><input type="checkbox" id="lockSwitch"><span class="slider-ui"></span></label>
+  </div>
+</div>
+
+<!-- OTA 升级 -->
+<div class="card main-only">
+  <h2>固件升级 (OTA)</h2>
+  <div class="ota-url-row">
+    <input type="text" id="otaUrl" placeholder="粘贴固件 .bin 链接 (http://...)">
+    <button class="btn-plain" id="btnOta">升级</button>
+  </div>
+  <div class="ota-progress" id="otaProgress">
+    <div class="ota-bar-bg"><div class="ota-bar" id="otaBar"></div></div>
+    <div class="ota-text" id="otaText">准备中...</div>
+  </div>
+</div>
+
+<!-- 日志 -->
+<div class="card main-only">
+  <div class="section-head"><h2>消息日志</h2><div style="display:flex;gap:8px"><button class="clear-log" id="btnExportLog">导出</button><button class="clear-log" id="btnClearLog">清空</button></div></div>
+  <div class="log-area" id="logArea"></div>
+</div>
+
+<!-- 历史视图 -->
+<div class="card hidden" id="historyView">
+  <div class="hist-head">
+    <button class="btn-plain" id="btnHistBack">← 返回</button>
+    <div class="hist-title" id="histTitle">--</div>
+    <div class="hist-range" id="histRange"></div>
+  </div>
+  <div id="chartBox"></div>
+  <div class="hist-hint">拖动框选时间段放大, 双击图表复位; 数据仅在面板打开期间采集</div>
+  <div id="eventCard">
+    <div class="section-head"><h2>变化记录</h2></div>
+    <div class="event-list" id="eventList"></div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="card main-only">
+  <div class="section-head"><h2>连接设置</h2><button class="clear-log" id="btnToggleSettings">展开/收起</button></div>
+  <div class="settings-grid" id="settingsBox">
+    <div>
+      <label>巴法云私钥 (32位)</label>
+      <input type="text" id="cfgUid" maxlength="32" placeholder="与设备一致的巴法云私钥">
+    </div>
+    <div>
+      <label>设备 ID</label>
+      <input type="text" id="cfgDev" maxlength="8" placeholder="如 01">
+    </div>
+    <div>
+      <label>MQTT WebSocket 地址</label>
+      <input type="text" id="cfgUrl" placeholder="wss://bemfa.com:9504/wss">
+    </div>
+    <div>
+      <label>网页端 ClientID 后缀 (可选)</label>
+      <input type="text" id="cfgSuffix" maxlength="8" placeholder="留空">
+    </div>
+    <div class="hint">
+      说明: 巴法云 MQTT 网页接入地址为 wss://bemfa.com:9504/wss (仅加密WebSocket)。
+      ClientID 用私钥本身(后缀留空); 实测巴法云允许多连接共用同一ClientID, 网页与设备可同时在线。
+      双击顶部设备页签可修改设备别名(如"NAS主机"), 留空恢复默认显示。
+    </div>
+    <div class="settings-actions">
+      <button class="btn-plain" id="btnSaveCfg">保存并连接</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ================= 配置管理 =================
+var CFG_KEY = "npsw_panel_cfg";
+var cfg = { uid: "", dev: "", url: "wss://bemfa.com:9504/wss", suffix: "" };
+
+function loadCfg() {
+  try {
+    var saved = JSON.parse(localStorage.getItem(CFG_KEY));
+    if (saved) cfg = Object.assign(cfg, saved);
+  } catch (e) {}
+  // 迁移: 早期版本的错误地址/后缀自动修正
+  if (cfg.url === "ws://bemfa.com:9502" || cfg.url === "ws://mqtt.bemfa.com:9502") cfg.url = "wss://bemfa.com:9504/wss";
+  if (cfg.suffix === "web") cfg.suffix = "";
+  document.getElementById("cfgUid").value = cfg.uid;
+  document.getElementById("cfgDev").value = cfg.dev;
+  document.getElementById("cfgUrl").value = cfg.url;
+  document.getElementById("cfgSuffix").value = cfg.suffix;
+}
+function saveCfgFromUI() {
+  cfg.uid = document.getElementById("cfgUid").value.trim();
+  cfg.dev = document.getElementById("cfgDev").value.trim();
+  cfg.url = document.getElementById("cfgUrl").value.trim() || "wss://bemfa.com:9504/wss";
+  cfg.suffix = document.getElementById("cfgSuffix").value.trim();
+  if (cfg.uid.length !== 32) { alert("私钥必须为32位"); return false; }
+  if (!cfg.dev) { alert("请填写设备ID"); return false; }
+  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+  return true;
+}
+
+// ================= 日志 (持久化到 localStorage) =================
+var logArea = document.getElementById("logArea");
+var LOG_KEY = "npsw_panel_log";
+var LOG_MAX = 3000;          // 持久化上限(条)
+var logStore = [];
+try { logStore = JSON.parse(localStorage.getItem(LOG_KEY)) || []; } catch (e) { logStore = []; }
+
+function addLog(type, text, noStore) {
+  var d = new Date();
+  var t = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2) + ":" + ("0" + d.getSeconds()).slice(-2);
+  var line = document.createElement("div");
+  line.className = "log-line";
+  line.innerHTML = '<span class="log-time">' + t + '</span><span class="log-' + type + '">' + text + '</span>';
+  logArea.appendChild(line);
+  while (logArea.children.length > 200) logArea.removeChild(logArea.firstChild);
+  logArea.scrollTop = logArea.scrollHeight;
+  if (!noStore) {
+    logStore.push({ t: t, d: d.toLocaleDateString(), type: type, text: text });
+    if (logStore.length > LOG_MAX) logStore = logStore.slice(-LOG_MAX);
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(logStore)); } catch (e) {}
+  }
+}
+// 加载历史日志(最多回放最近200条到可视区)
+(function loadLog() {
+  var show = logStore.slice(-200);
+  show.forEach(function (e) {
+    var line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = '<span class="log-time">' + e.t + '</span><span class="log-' + e.type + '">' + e.text + '</span>';
+    logArea.appendChild(line);
+  });
+  logArea.scrollTop = logArea.scrollHeight;
+  if (logStore.length) addLog("info", "已加载 " + logStore.length + " 条历史日志 (最多回放最近200条)", true);
+})();
+
+document.getElementById("btnClearLog").onclick = function () {
+  logStore = [];
+  try { localStorage.removeItem(LOG_KEY); } catch (e) {}
+  logArea.innerHTML = "";
+  addLog("info", "日志已清空(含历史)", true);
+};
+document.getElementById("btnExportLog").onclick = function () {
+  var blob = new Blob([logStore.map(function (e) { return e.d + " " + e.t + " [" + e.type + "] " + e.text; }).join("\r\n")], { type: "text/plain;charset=utf-8" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "NAS面板日志_" + new Date().toISOString().slice(0, 10) + ".txt";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+// ================= MQTT 连接 =================
+var mqttClient = null;
+var otaActive = false;
+
+function setConn(state, text) {
+  var dot = document.getElementById("connDot");
+  dot.className = "conn-dot" + (state === "ok" ? " ok" : state === "wait" ? " wait" : "");
+  document.getElementById("connText").textContent = text;
+}
+
+function connect() {
+  if (mqttClient) { try { mqttClient.end(true); } catch (e) {} }
+  if (!cfg.uid || !cfg.dev) {
+    setConn("", "未配置");
+    document.getElementById("settingsBox").classList.remove("hidden");
+    return;
+  }
+  var webClientId = cfg.uid + (cfg.suffix ? "_" + cfg.suffix : "");
+  setConn("wait", "连接中...");
+  addLog("info", "正在连接 " + cfg.url + " (ClientID: " + webClientId.slice(0, 8) + "..." + webClientId.slice(-6) + ")");
+
+  try {
+    mqttClient = mqtt.connect(cfg.url, {
+      clientId: webClientId,
+      keepalive: 30,
+      clean: true,
+      reconnectPeriod: 0, // 手动控制重连, 连接失败给出明确提示
+      connectTimeout: 8000
+    });
+  } catch (e) {
+    setConn("", "连接失败");
+    addLog("err", "连接异常: " + e.message);
+    return;
+  }
+
+  mqttClient.on("connect", function () {
+    setConn("ok", "已连接");
+    addLog("info", "MQTT 已连接, 订阅 DeviceDataUp");
+    mqttClient.subscribe("DeviceDataUp", function (err) {
+      if (err) addLog("err", "订阅失败: " + err.message);
+    });
+  });
+
+  mqttClient.on("reconnect", function () { setConn("wait", "重连中..."); });
+
+  mqttClient.on("close", function () {
+    setConn("", "已断开");
+    addLog("err", "连接已断开 (检查地址端口/私钥是否正确)");
+  });
+
+  mqttClient.on("error", function (err) {
+    addLog("err", "连接错误: " + (err.message || err));
+  });
+
+  mqttClient.on("message", function (topic, payload) {
+    handleUp(payload.toString());
+  });
+}
+
+// ================= 多设备管理 =================
+var devices = {};      // id -> { msg:最近心跳, hbTime:最近心跳本地时间, stale:是否失联 }
+var currentDev = null; // 当前选中设备
+var ALIAS_KEY = "npsw_panel_alias";
+var alias = {};        // id -> 别名(双击页签修改)
+try { alias = JSON.parse(localStorage.getItem(ALIAS_KEY)) || {}; } catch (e) { alias = {}; }
+function escHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+function devName(id) { return alias[id] ? escHtml(alias[id]) : "设备 " + id; }
+
+function renderDevTabs() {
+  var box = document.getElementById("devTabs");
+  box.innerHTML = "";
+  Object.keys(devices).sort().forEach(function (id) {
+    var d = devices[id];
+    var b = document.createElement("button");
+    b.className = "dev-tab" + (id === currentDev ? " active" : "");
+    b.innerHTML = '<span class="dot' + (d.stale ? "" : " on") + '"></span>' + devName(id);
+    b.ondblclick = function () {
+      var v = prompt("设置设备 " + id + " 的别名(留空恢复默认):", alias[id] || "");
+      if (v === null) return;
+      v = v.trim();
+      if (v) alias[id] = v; else delete alias[id];
+      try { localStorage.setItem(ALIAS_KEY, JSON.stringify(alias)); } catch (e) {}
+      renderDevTabs();
+    };
+    b.onclick = function () {
+      currentDev = id;
+      renderDevTabs();
+      if (d.msg) renderStatus(d.msg);
+      updateStaleUI();
+      if (!document.getElementById("historyView").classList.contains("hidden")) renderHistory();
+    };
+    box.appendChild(b);
+  });
+  document.getElementById("devLabel").textContent = currentDev ? (alias[currentDev] ? alias[currentDev] + " (" + currentDev + ")" : "设备 " + currentDev) : "";
+}
+
+function updateStaleUI() {
+  var card = document.getElementById("statusCard");
+  var cur = currentDev ? devices[currentDev] : null;
+  if (cur && cur.stale) card.classList.add("stale");
+  else card.classList.remove("stale");
+  renderDevTabs();
+}
+
+// ================= 历史数据采集 (持久化到 localStorage) =================
+var HIST_KEY = "npsw_panel_hist";
+var TEMP_MAX = 15000;       // 温度点上限(~4天, 15秒/点)
+var hist = {};              // devId -> { temp:[[ts,v]...], power:[[ts,v]...], fan/lock/threshold/version:[[ts,v]...]变化点 }
+var histDirty = false;
+try { hist = JSON.parse(localStorage.getItem(HIST_KEY)) || {}; } catch (e) { hist = {}; }
+
+function recordHistory(devId, msg) {
+  var h = hist[devId];
+  if (!h) h = hist[devId] = { temp: [], power: [], fan: [], lock: [], threshold: [], version: [] };
+  var ts = msg.ts || Math.floor(Date.now() / 1000);
+  // 温度: 全量采集
+  if (typeof msg.temp === "number") {
+    h.temp.push([ts, msg.temp]);
+    if (h.temp.length > TEMP_MAX) h.temp = h.temp.slice(-TEMP_MAX);
+  }
+  // 开关量/阈值/版本: 只记变化点(含首点)
+  var fields = [["power", msg.power === "on" ? 1 : 0], ["fan", msg.fan === "on" ? 1 : 0],
+                ["lock", msg.child_lock === true || msg.child_lock === "true" ? 1 : 0],
+                ["threshold", msg.threshold], ["version", msg.version]];
+  fields.forEach(function (f) {
+    var key = f[0], v = f[1];
+    if (v === undefined || v === null) return;
+    var arr = h[key];
+    var last = arr.length ? arr[arr.length - 1][1] : undefined;
+    if (last === undefined || String(last) !== String(v)) arr.push([ts, v]);
+  });
+  histDirty = true;
+}
+
+// 节流持久化: 每30秒写一次
+setInterval(function () {
+  if (!histDirty) return;
+  histDirty = false;
+  try {
+    var s = JSON.stringify(hist);
+    if (s.length > 4000000) { // 超4MB: 删各设备最旧一半温度数据
+      Object.keys(hist).forEach(function (id) { hist[id].temp = hist[id].temp.slice(-Math.floor(hist[id].temp.length / 2)); });
+      s = JSON.stringify(hist);
+    }
+    localStorage.setItem(HIST_KEY, s);
+  } catch (e) {}
+}, 30000);
+// 页面关闭前兜底保存
+window.addEventListener("beforeunload", function () {
+  if (histDirty) { try { localStorage.setItem(HIST_KEY, JSON.stringify(hist)); } catch (e) {} }
+});
+
+// ================= 历史视图 =================
+var HIST_FIELDS = {
+  power:     { name: "主机电源", kind: "step" },
+  temp:      { name: "板载温度", kind: "line" },
+  fan:       { name: "风扇",     kind: "step" },
+  lock:      { name: "童锁",     kind: "step" },
+  threshold: { name: "风扇阈值", kind: "step" },
+  version:   { name: "固件版本", kind: "text" }
+};
+var histField = null;
+var uplot = null;
+
+function fmtTs(ts) {
+  var d = new Date(ts * 1000);
+  return ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2) + " " +
+         ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+}
+function fmtTsFull(ts) {
+  var d = new Date(ts * 1000);
+  return fmtTs(ts) + ":" + ("0" + d.getSeconds()).slice(-2);
+}
+
+function openHistory(field) {
+  if (!currentDev) { alert("未选中设备"); return; }
+  histField = field;
+  var meta = HIST_FIELDS[field];
+  document.querySelectorAll(".main-only").forEach(function (el) { el.classList.add("hidden"); });
+  document.getElementById("historyView").classList.remove("hidden");
+  document.getElementById("histTitle").textContent = devName(currentDev) + " - " + meta.name;
+  renderHistory();
+}
+document.getElementById("btnHistBack").onclick = function () {
+  if (uplot) { uplot.destroy(); uplot = null; }
+  document.getElementById("historyView").classList.add("hidden");
+  document.querySelectorAll(".main-only").forEach(function (el) { el.classList.remove("hidden"); });
+};
+
+function renderHistory() {
+  var meta = HIST_FIELDS[histField];
+  var h = hist[currentDev] || { temp: [], power: [], fan: [], lock: [], threshold: [], version: [] };
+  var data = h[histField] || [];
+  var eventBox = document.getElementById("eventList");
+  var chartBox = document.getElementById("chartBox");
+  eventBox.innerHTML = "";
+  document.getElementById("histRange").textContent = data.length ? "共 " + data.length + " 个数据点" : "暂无数据";
+
+  // 变化记录列表
+  if (meta.kind !== "line" && data.length) {
+    var text = function (v) {
+      if (histField === "power" || histField === "fan") return v ? "开" : "关";
+      if (histField === "lock") return v ? "锁定" : "解锁";
+      return String(v);
+    };
+    for (var i = data.length - 1; i >= 0; i--) {
+      var prev = i > 0 ? text(data[i - 1][1]) : "(初始)";
+      var cur = text(data[i][1]);
+      var row = document.createElement("div");
+      row.className = "event-item";
+      row.innerHTML = '<span class="ev-time">' + fmtTsFull(data[i][0]) + '</span>' +
+        '<span>' + prev + ' → <span class="' + (data[i][1] ? "up" : "down") + '">' + cur + '</span></span>';
+      eventBox.appendChild(row);
+    }
+  } else {
+    eventBox.innerHTML = '<div class="event-item"><span class="hint">连续量无变化记录, 见上图折线</span></div>';
+  }
+
+  // 图表
+  if (uplot) { uplot.destroy(); uplot = null; }
+  chartBox.innerHTML = "";
+  if (meta.kind === "text" || data.length < 2) {
+    chartBox.innerHTML = '<div class="hint" style="padding:40px 0;text-align:center">' +
+      (meta.kind === "text" ? "固件版本无折线图, 见上方变化记录" : "数据不足, 等待心跳积累") + '</div>';
+    return;
+  }
+
+  // 阶梯数据: 每个变化点重复x, 形成方波
+  var xs = [], ys = [];
+  if (meta.kind === "step") {
+    for (var j = 0; j < data.length; j++) {
+      if (j > 0) { xs.push(data[j][0]); ys.push(data[j - 1][1]); } // 重复点形成垂直沿
+      xs.push(data[j][0]); ys.push(data[j][1]);
+    }
+  } else {
+    data.forEach(function (p) { xs.push(p[0]); ys.push(p[1]); });
+  }
+
+  var isBinary = meta.kind === "step" && (histField === "power" || histField === "fan" || histField === "lock");
+  var stroke = histField === "temp" ? "#f85149" : histField === "threshold" ? "#d29922" : "#3fb950";
+  var w = chartBox.clientWidth - 8;
+  var opts = {
+    width: Math.max(w, 280), height: 260,
+    scales: { x: { time: false }, y: isBinary ? { range: [-0.2, 1.2] } : { auto: true } },
+    axes: [
+      { values: function (u, splits) { return splits.map(fmtTs); } },
+      { values: isBinary ? function (u, splits) { return splits.map(function (v) { return v === 1 ? "开" : v === 0 ? "关" : ""; }); }
+                         : function (u, splits) { return splits.map(function (v) { return v + (histField === "temp" || histField === "threshold" ? "°" : ""); }); } }
+    ],
+    series: [
+      {},
+      { label: meta.name, stroke: stroke, width: 2, points: { show: false } }
+    ],
+    cursor: { drag: { x: true, y: false } }
+  };
+  uplot = new uPlot(opts, [xs, ys], chartBox);
+}
+
+// 窗口尺寸变化时重绘
+window.addEventListener("resize", function () {
+  if (!document.getElementById("historyView").classList.contains("hidden")) renderHistory();
+});
+
+// ================= 上行消息处理 =================
+// 错误码翻译成人话
+var ERR_TEXT = {
+  "host_no_response": "主机未应答(上次按键后D2无变化, 120秒内禁止重复)",
+  "cooldown": "关机冷却中(120秒内禁止开关机, 保护硬盘)",
+  "already_on": "主机已在运行, 无需开机",
+  "already_off": "主机已停机, 无需关机",
+  "bad_value": "参数错误",
+  "bad_url": "固件链接无效(必须http开头)"
+};
+
+function handleUp(raw) {
+  var msg;
+  try { msg = JSON.parse(raw); } catch (e) { addLog("hb", "[未识别] " + raw); return; }
+  if (msg.device !== "NAS_PowerBoard") { addLog("hb", "[未识别] " + raw); return; } // 其他协议/其他类型设备的消息
+
+  var ts = msg.ts ? new Date(msg.ts * 1000) : new Date();
+  var tsStr = ("0" + ts.getHours()).slice(-2) + ":" + ("0" + ts.getMinutes()).slice(-2) + ":" + ("0" + ts.getSeconds()).slice(-2);
+  var tag = msg.id ? "[" + msg.id + "] " : "";
+
+  if (msg.ack) {
+    if (msg.error) {
+      addLog("err", tag + "ACK " + msg.ack + " 失败: " + (ERR_TEXT[msg.error] || msg.error));
+      if (msg.error === "bad_url") otaStop("链接被拒绝");
+    } else {
+      addLog("ack", tag + "ACK " + msg.ack + " ✓ " + tsStr);
+    }
+    return;
+  }
+  if (msg.ota) {
+    if (msg.id === currentDev) handleOta(msg); // 进度条只跟随当前选中设备
+    addLog("ota", tag + "OTA: " + msg.ota + (msg.cur !== undefined ? " " + msg.cur + "/" + msg.total : "") + (msg.code !== undefined ? " code=" + msg.code : "") + (msg.version !== undefined ? " v" + msg.version : ""));
+    return;
+  }
+  if (msg.power !== undefined) { // 心跳/状态
+    // 注册设备(自动发现新设备)
+    if (!devices[msg.id]) {
+      devices[msg.id] = { msg: null, hbTime: 0, stale: false };
+      addLog("info", "发现新设备: " + msg.id);
+      if (!currentDev || !devices[currentDev]) currentDev = msg.id; // 无选中或配置的ID与实际设备不符时自动纠正
+      renderDevTabs();
+    }
+    var d = devices[msg.id];
+    d.msg = msg;
+    d.hbTime = Date.now();
+    d.stale = false;
+    recordHistory(msg.id, msg);
+    renderDevTabs();
+    if (msg.id === currentDev) {
+      document.getElementById("hbTime").textContent = "心跳 " + tsStr;
+      renderStatus(msg);
+      updateStaleUI();
+    }
+    addLog("hb", tag + "心跳: " + msg.power + " / " + msg.temp + "°C / 风扇" + msg.fan);
+  }
+}
+
+function renderStatus(msg) {
+  var p = document.getElementById("stPower");
+  p.textContent = msg.power === "on" ? "运行中" : "已停机";
+  p.className = "value big " + (msg.power === "on" ? "on" : "off");
+
+  var t = document.getElementById("stTemp");
+  var temp = parseFloat(msg.temp);
+  t.textContent = (isNaN(temp) ? "--" : temp.toFixed(1)) + "°";
+  t.className = "value big " + (temp >= 60 ? "hot" : temp >= 45 ? "warn" : "on");
+
+  var f = document.getElementById("stFan");
+  f.textContent = msg.fan === "on" ? "转动" : "停止";
+  f.className = "value " + (msg.fan === "on" ? "on" : "off");
+
+  var l = document.getElementById("stLock");
+  l.textContent = msg.child_lock === true || msg.child_lock === "true" ? "已锁" : "解锁";
+  l.className = "value " + (msg.child_lock === true || msg.child_lock === "true" ? "hot" : "off");
+  document.getElementById("lockSwitch").checked = (msg.child_lock === true || msg.child_lock === "true");
+
+  document.getElementById("stThresh").textContent = msg.threshold + "°";
+  document.getElementById("fanSlider").value = msg.threshold;
+  document.getElementById("fanVal").textContent = msg.threshold + "°";
+
+  document.getElementById("stVer").textContent = msg.version || "--";
+  document.getElementById("statusCard").classList.remove("stale");
+}
+
+// 心跳失联检测: 每台设备独立, 超过45秒无心跳标记失联
+setInterval(function () {
+  var changed = false;
+  Object.keys(devices).forEach(function (id) {
+    var d = devices[id];
+    if (d.hbTime > 0 && !d.stale && Date.now() - d.hbTime > 45000) {
+      d.stale = true;
+      changed = true;
+      addLog("err", "[" + id + "] 超过45秒无心跳, 标记失联");
+    }
+  });
+  if (changed) updateStaleUI();
+}, 5000);
+
+// ================= 下行命令 =================
+function sendCmd(action, extra) {
+  if (!mqttClient || !mqttClient.connected) { addLog("err", "未连接, 命令未发送"); return false; }
+  if (!currentDev) { addLog("err", "未选中设备"); return false; }
+  var msg = Object.assign({ device: "NAS_PowerBoard", id: currentDev, action: action }, extra || {});
+  mqttClient.publish("DeviceDataDown", JSON.stringify(msg));
+  addLog("info", "[" + currentDev + "] 下发: " + action + (extra && extra.url ? " " + extra.url : "") + (extra && extra.value !== undefined ? " value=" + extra.value : ""));
+  return true;
+}
+
+document.getElementById("btnOn").onclick = function () {
+  if (sendCmd("power_on")) addLog("info", "已请求开机...");
+};
+document.getElementById("btnOff").onclick = function () {
+  if (confirm("确认执行 ACPI 软关机？")) {
+    if (sendCmd("power_off")) addLog("info", "已请求软关机...");
+  }
+};
+document.getElementById("btnForce").onclick = function () {
+  if (confirm("强制关机 = 长按电源键5秒断电, 可能损坏硬盘数据!\n真的要执行吗?")) {
+    if (confirm("再次确认: 强制断电?")) {
+      if (sendCmd("force_off")) addLog("err", "已请求强制断电!");
+    }
+  }
+};
+
+// 风扇阈值
+document.getElementById("fanSlider").oninput = function () {
+  document.getElementById("fanVal").textContent = this.value + "°";
+};
+document.getElementById("btnFanSet").onclick = function () {
+  var v = parseInt(document.getElementById("fanSlider").value, 10);
+  if (v >= 20 && v <= 80) sendCmd("set_fan", { value: v });
+};
+
+// 童锁
+document.getElementById("lockSwitch").onchange = function () {
+  sendCmd("set_lock", { value: this.checked });
+};
+
+// ================= OTA =================
+function otaStop(reason) {
+  otaActive = false;
+  document.getElementById("otaProgress").style.display = "none";
+  if (reason) addLog("err", "OTA 已停止: " + reason);
+}
+function handleOta(msg) {
+  if (msg.ota === "start") {
+    otaActive = true;
+    document.getElementById("otaProgress").style.display = "block";
+    document.getElementById("otaBar").style.width = "0%";
+    document.getElementById("otaText").textContent = "下载中 0%";
+    addLog("ota", "OTA 开始下载");
+  } else if (msg.ota === "progress") {
+    var pct = msg.total > 0 ? Math.round(msg.cur * 100 / msg.total) : 0;
+    document.getElementById("otaBar").style.width = pct + "%";
+    document.getElementById("otaText").textContent = "下载中 " + pct + "% (" + msg.cur + "/" + msg.total + ")";
+  } else if (msg.ota === "done") {
+    document.getElementById("otaBar").style.width = "100%";
+    document.getElementById("otaText").textContent = "写入完成, 等待设备重启...";
+    addLog("ota", "OTA 写入完成, 设备即将重启");
+    setTimeout(function () {
+      if (!otaActive) return; // 已收到boot_ok确认, 不覆盖升级成功提示
+      otaActive = false;
+      document.getElementById("otaText").textContent = "未收到启动确认(boot_ok), 请观察心跳与固件版本";
+      setTimeout(function () { document.getElementById("otaProgress").style.display = "none"; }, 8000);
+    }, 20000);
+  } else if (msg.ota === "boot_ok") {
+    otaActive = false;
+    document.getElementById("otaProgress").style.display = "block";
+    document.getElementById("otaBar").style.width = "100%";
+    document.getElementById("otaText").style.color = "var(--green)";
+    document.getElementById("otaText").textContent = "升级成功! 新固件 " + (msg.version || "?") + " 已启动";
+    setTimeout(function () {
+      document.getElementById("otaProgress").style.display = "none";
+      document.getElementById("otaText").style.color = "";
+    }, 8000);
+  } else if (msg.ota === "error") {
+    var codeText = {
+      "-100": "空间不足", "-101": "服务器未报尺寸", "-102": "固件不存在(404)",
+      "-103": "服务器拒绝", "-104": "HTTP错误", "-108": "固件与flash布局不匹配"
+    }[String(msg.code)] || ("错误码 " + msg.code);
+    addLog("err", "OTA 失败: " + codeText);
+    otaStop("失败(" + codeText + ")");
+    document.getElementById("otaProgress").style.display = "block";
+    document.getElementById("otaText").textContent = "失败: " + codeText;
+  }
+}
+document.getElementById("btnOta").onclick = function () {
+  var url = document.getElementById("otaUrl").value.trim();
+  if (!url) { alert("请粘贴固件链接"); return; }
+  if (url.indexOf("http") !== 0) { alert("链接必须以 http 开头"); return; }
+  if (confirm("确认升级固件? 升级期间设备离线约1分钟")) {
+    sendCmd("update", { url: url });
+  }
+};
+
+// ================= 设置面板 =================
+document.getElementById("btnToggleSettings").onclick = function () {
+  document.getElementById("settingsBox").classList.toggle("hidden");
+};
+document.getElementById("btnSaveCfg").onclick = function () {
+  if (saveCfgFromUI()) {
+    document.getElementById("settingsBox").classList.add("hidden");
+    currentDev = cfg.dev; // 保存的设备ID作为默认选中
+    devices = {};
+    renderDevTabs();
+    addLog("info", "配置已保存, 正在连接...");
+    connect();
+  }
+};
+
+// ================= 启动 =================
+loadCfg();
+if (cfg.uid && cfg.dev) {
+  document.getElementById("settingsBox").classList.add("hidden");
+  currentDev = cfg.dev;
+  connect();
+} else {
+  setConn("", "未配置");
+  addLog("info", "首次使用: 请填写巴法云私钥与设备ID");
+}
+
+// ================= PWA =================
+// HTTPS部署后可"安装"到手机主屏(安卓Chrome安装应用/iOS Safari添加到主屏幕)
+// 本地file://打开时自动跳过, 不影响原有使用方式
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+  navigator.serviceWorker.register("sw.js").catch(function (e) { addLog("info", "PWA 缓存未启用: " + (e.message || e)); });
+}
+</script>
+</body>
+</html>
